@@ -1,0 +1,41 @@
+name: "cypress-e2e"
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Cypress tests
+        run: npx cypress run
+
+      - name: Upload JUnit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-artifact
+          path: cypress/results/results.xml
+
+      - name: Upload to Zephyr via curl
+        if: always()
+        env:
+          ZEPHYR_BASE_URL: ${{ vars.ZEPHYR_BASE_URL }}
+          ZEPHYR_PROJECT_KEY: ${{ vars.ZEPHYR_PROJECT_KEY }}
+          ZEPHYR_TOKEN: ${{ secrets.ZEPHYR_TOKEN }}
+        run: >-
+          curl --location --request POST "${ZEPHYR_BASE_URL}/automations/executions/junit?autoCreateTestCases=true&projectKey=${ZEPHYR_PROJECT_KEY}" \
+          --header "Authorization: Bearer ${ZEPHYR_TOKEN}" \
+          --form "file=@cypress/results/results.xml"
