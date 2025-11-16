@@ -1,4 +1,5 @@
 name: "cypress-e2e"
+
 on:
   workflow_dispatch:
   push:
@@ -16,11 +17,13 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (including axios)
+        # Dodajemy instalację axios, który jest potrzebny do komunikacji API
+        run: npm ci && npm install axios
 
       - name: Run Cypress tests
-        run: npx cypress run
+        # Pamiętaj, aby Cypress był skonfigurowany do generowania results.xml
+        run: npx cypress run --reporter junit --reporter-options "mochaFile=cypress/results/results.xml"
 
       - name: Upload JUnit artifact
         if: always()
@@ -29,13 +32,75 @@ jobs:
           name: junit-artifact
           path: cypress/results/results.xml
 
-      - name: Upload to Zephyr via curl
+      - name: Upload JUnit report to Xray
+        # Używamy if: always() aby wysłać raport nawet jeśli testy nie powiodły się
         if: always()
         env:
-          ZEPHYR_BASE_URL: ${{ vars.ZEPHYR_BASE_URL }}
-          ZEPHYR_PROJECT_KEY: ${{ vars.ZEPHYR_PROJECT_KEY }}
-          ZEPHYR_TOKEN: ${{ secrets.ZEPHYR_TOKEN }}
-        run: >-
-          curl --location --request POST "${ZEPHYR_BASE_URL}/automations/executions/junit?autoCreateTestCases=true&projectKey=${ZEPHYR_PROJECT_KEY}" \
-          --header "Authorization: Bearer ${ZEPHYR_TOKEN}" \
-          --form "file=@cypress/results/results.xml"
+          XRAY_CLIENT_ID: ${{ secrets.XRAY_CLIENT_ID }}
+          XRAY_CLIENT_SECRET: ${{ secrets.XRAY_CLIENT_SECRET }}
+          PROJECT_KEY: ${{ vars.PROJECT_KEY }}
+          TEST_EXEC_KEY: ${{ vars.TEST_EXEC_KEY }}
+        run: |
+          # Ścieżki i URL-e (zgodne z Twoją działającą konfiguracją)
+          XRAY_AUTH_URL="https://xray.cloud.getxray.app/api/v2/authenticate"
+          XRAY_IMPORT_URL="https://xray.cloud.getxray.app/api/v2/import/execution/junit"
+          JUNIT_FILE_PATH="cypress/results/results.xml"
+
+          # 1. Tworzenie i wykonywanie skryptu Node.js
+          node -e "
+          const axios = require('axios');
+          const fs = require('fs');
+
+          async function getXrayToken() {
+            try {
+              const authResponse = await axios.post(
+                '${{ env.XRAY_AUTH_URL }}',
+                { client_id: '${{ env.XRAY_CLIENT_ID }}', client_secret: '${{ env.XRAY_CLIENT_SECRET }}' },
+                { headers: { 'Content-Type': 'application/json' } }
+              );
+              return authResponse.data.replace(/\"/g, ''); 
+            } catch (error) {
+              console.error('Błąd autoryzacji Xray. Sprawdź sekrety.');
+              throw error;
+            }
+          }
+
+          async function uploadJUnitReport(token) {
+            if (!fs.existsSync('${{ env.JUNIT_FILE_PATH }}')) {
+              console.error('Plik XML nie znaleziony. Anulowanie uploadu.');
+              return;
+            }
+
+            const junitXml = fs.readFileSync('${{ env.JUNIT_FILE_PATH }}', 'utf-8');
+            const uploadUrl = '${{ env.XRAY_IMPORT_URL }}?projectKey=${{ env.PROJECT_KEY }}&testExecKey=${{ env.TEST_EXEC_KEY }}';
+
+            try {
+              const uploadResponse = await axios.post(
+                uploadUrl,
+                junitXml, 
+                {
+                  headers: {
+                    'Content-Type': 'text/xml',
+                    'Authorization': 'Bearer ' + token
+                  }
+                }
+              );
+
+              console.log('✅ Xray Upload Sukces! Status: ' + uploadResponse.status);
+              console.log('Wynik: ' + JSON.stringify(uploadResponse.data));
+
+            } catch (error) {
+              console.error('❌ Błąd uploadu do Xray.');
+              console.error('Status: ' + (error.response?.status || error.message));
+              console.error('Błąd Xray: ' + JSON.stringify(error.response?.data));
+              process.exit(1);
+            }
+          }
+
+          async function main() {
+            const token = await getXrayToken();
+            await uploadJUnitReport(token);
+          }
+
+          main();
+          "
